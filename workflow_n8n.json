@@ -1,0 +1,230 @@
+{
+  "name": "Enterprise AI Lead Scoring & CRM Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ],
+      "id": "node-webhook-inbound",
+      "name": "Webhook Inbound Lead"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Defensive validation\nif (!body.email || !body.company) {\n  throw new Error('Validation Failed: Missing required fields (email, company)');\n}\n\n// Normalize data\nreturn {\n  json: {\n    received_at: new Date().toISOString(),\n    lead_email: body.email.toLowerCase().trim(),\n    lead_name: body.name || 'Anonymous',\n    company_name: body.company,\n    budget_usd: Number(body.budget || 0),\n    interests: body.interests || [],\n    raw_notes: body.message || 'No additional notes'\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        300
+      ],
+      "id": "node-sanitize-code",
+      "name": "Sanitize & Validate Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.1,\n  \"response_format\": {\n    \"type\": \"json_object\"\n  },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an enterprise Lead Qualification Specialist. Analyze the lead's company, budget, and notes. Output strict JSON with properties: lead_score (integer 1-100), qualification (HIGH | MEDIUM | LOW), reasoning (string max 30 words), recommended_action (string).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Company: \" + $json.company_name + \", Budget: $\" + $json.budget_usd + \", Notes: \" + $json.raw_notes\n    }\n  ]\n}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        300
+      ],
+      "id": "node-openai-scoring",
+      "name": "OpenAI AI Lead Scoring"
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = JSON.parse($input.first().json.choices[0].message.content);\nconst originalData = $('Sanitize & Validate Payload').first().json;\n\nreturn {\n  json: {\n    ...originalData,\n    lead_score: aiResponse.lead_score,\n    qualification: aiResponse.qualification,\n    reasoning: aiResponse.reasoning,\n    recommended_action: aiResponse.recommended_action,\n    is_hot_lead: aiResponse.lead_score >= 80\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ],
+      "id": "node-parse-ai",
+      "name": "Extract Structured AI Output"
+    },
+    {
+      "parameters": {
+        "dataType": "boolean",
+        "value1": "={{ $json.is_hot_lead }}",
+        "value2": true
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ],
+      "id": "node-router-lead-priority",
+      "name": "Is Hot Lead (Score >= 80)?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/MOCK_WEBHOOK_SALES_PRIORITY",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🔥 *HOT ENTERPRISE LEAD DETECTED*\\n*Company:* \" + $json.company_name + \"\\n*Score:* \" + $json.lead_score + \"/100\\n*Budget:* $\" + $json.budget_usd + \"\\n*AI Assessment:* \" + $json.reasoning + \"\\n*Contact:* \" + $json.lead_email\n}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        180
+      ],
+      "id": "node-slack-alert-hot",
+      "name": "Instant Slack Priority Alert"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.crm-mock.io/v1/nurture-queue",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"email\": $json.lead_email,\n  \"campaign\": \"standard_nurturing_sequence\",\n  \"lead_score\": $json.lead_score\n}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        420
+      ],
+      "id": "node-crm-standard-queue",
+      "name": "Enroll in Email Nurturing"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 201
+        },
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Lead successfully processed and scored.\",\n  \"lead_score\": $json.lead_score,\n  \"qualification\": $json.qualification\n}"
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1620,
+        300
+      ],
+      "id": "node-respond-webhook",
+      "name": "HTTP 201 Response"
+    }
+  ],
+  "connections": {
+    "Webhook Inbound Lead": {
+      "main": [
+        [
+          {
+            "node": "Sanitize & Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize & Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "OpenAI AI Lead Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI AI Lead Scoring": {
+      "main": [
+        [
+          {
+            "node": "Extract Structured AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Structured AI Output": {
+      "main": [
+        [
+          {
+            "node": "Is Hot Lead (Score >= 80)?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Hot Lead (Score >= 80)?": {
+      "main": [
+        [
+          {
+            "node": "Instant Slack Priority Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enroll in Email Nurturing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instant Slack Priority Alert": {
+      "main": [
+        [
+          {
+            "node": "HTTP 201 Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enroll in Email Nurturing": {
+      "main": [
+        [
+          {
+            "node": "HTTP 201 Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
